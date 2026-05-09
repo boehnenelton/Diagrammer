@@ -1,0 +1,1180 @@
+<!--
+==============================================================================
+  FILE:         BEJSON_Diagrammer-v42.html
+  VERSION:      42.0.0
+  RELATION_ID:  7a6cbdbd-4e59-45f3-9ed0-bcfd628fb406
+  AUTHOR:       Elton Boehnen
+  EMAIL:        boehnenelton2024@gmail.com
+  GITHUB:       github.com/boehnenelton
+  SITE:         https://boehnenelton2024.pages.dev
+  DESCRIPTION:  Standalone browser-based touch-optimised diagramming tool.
+                BEJSON 104db schema. Node hierarchy, Object Panel, grid snap,
+                deduped connectors. No server required.
+  CHANGELOG v40.0:
+    - FIX: Node dragging now works on Android WebView and all touch devices.
+           Root cause: viewport touch-action:pan-x pan-y was claiming the
+           gesture before shapeDown could handle it; toggling .locked after
+           pointerdown is too late for the browser's touch decision.
+           Fix: e.preventDefault() called immediately in handleShapeDown;
+           pointer capture removed entirely (destroyed by render() mid-drag,
+           causing pointercancel and silent drop); window-level pointermove
+           and pointerup handlers are sufficient for reliable drag tracking.
+    - FIX: Removed .locked/.unlocked viewport class toggle (race condition).
+    - From v28: Default light theme
+    - From v28: Default zoom 75%
+    - From v28: Tier-based default node sizes (Root=200x120 down to 90x60)
+    - From v27: setPointerCapture/releasePointerCapture in try-catch (removed)
+    - From v26: Grid snapping default ON (50px), toggle in Properties
+    - From v26: Object Panel — floating draggable node list, bottom-left FAB
+    - From v26: Node hierarchy — parentId, generation, collapsed; tier stripes
+    - From v26: Collapse/expand button on parent nodes
+    - From v26: Add Child Node with auto-layout and collision detection
+    - From v26: Make Root Node button
+    - From v26: Adopt-up on parent delete (children re-parented to grandparent)
+    - From v26: Connector deduplication (same anchor pair, both directions)
+    - From v26: Connector thick invisible hit area (20px) for touch selection
+    - From v26: Selected connector arrowheads in accent red
+    - From v26: Group Manager removed (superseded by hierarchy)
+    - BEJSON 104db schema: Shape adds parentId, generation, collapsed fields
+==============================================================================
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>BEJSON Diagrammer v42.0</title>
+<style>
+:root {
+    --bg: #121212; --panel: #1e1e1e; --ruler: #181818; --ruler-b: #333;
+    --fg: #ffffff; --accent: #DE2626; --dead: #000; --canvas: #000;
+    --grid: #222; --grid2: #333; --sh: 30px; --inp: #252525; --inpb: #444;
+}
+body.light {
+    --bg: #f0f0f0; --panel: #ffffff; --ruler: #e0e0e0; --ruler-b: #ccc;
+    --fg: #000000; --dead: #e0e0e0; --canvas: #ffffff; --grid: #eaeaea;
+    --inp: #fff; --inpb: #ccc;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
+body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+    font-family: 'Segoe UI', Roboto, sans-serif; overflow: hidden;
+    width: 100vw; height: 100vh;
+    display: grid; grid-template-columns: 30px 1fr; grid-template-rows: 30px 1fr;
+    overscroll-behavior: none;
+}
+
+/* ── RULERS ── */
+.ruler-corner { background: var(--ruler); z-index: 20; border-right: 1px solid var(--ruler-b); border-bottom: 1px solid var(--ruler-b); }
+.ruler-h { background: var(--ruler); overflow: hidden; position: relative; border-bottom: 1px solid var(--ruler-b); }
+.ruler-v { background: var(--ruler); overflow: hidden; position: relative; border-right: 1px solid var(--ruler-b); }
+.tick { position: absolute; font-size: 9px; color: #888; pointer-events: none; }
+.tick-h { border-left: 1px solid var(--ruler-b); top: 0; height: 100%; padding-left: 2px; padding-top: 15px; }
+.tick-v { border-top: 1px solid var(--ruler-b); left: 0; width: 100%; padding-top: 2px; padding-left: 2px; }
+
+/* ── VIEWPORT ──
+   touch-action: pan-x pan-y for two-finger canvas scroll.
+   Nodes call e.preventDefault() on pointerdown so the browser doesn't
+   claim their touch gesture as a scroll. */
+#viewport {
+    grid-column: 2; grid-row: 2; position: relative;
+    background: var(--dead); overflow: auto;
+    touch-action: pan-x pan-y; display: block;
+    padding-bottom: var(--sh);
+}
+#canvas-container {
+    transform-origin: 0 0; position: relative; width: 2000px; height: 2000px;
+    background-color: var(--canvas);
+    background-image: linear-gradient(var(--grid) 1px, transparent 1px),
+                      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 50px 50px; margin: 0;
+    border-right: 1px solid var(--grid2); border-bottom: 1px solid var(--grid2);
+}
+svg { width: 100%; height: 100%; display: block; touch-action: none; }
+
+/* ── SHAPES ── */
+.shape-group { touch-action: none; cursor: grab; }
+.shape-group:active { cursor: grabbing; }
+.shape-rect { stroke: transparent; stroke-width: 0; vector-effect: non-scaling-stroke; transition: stroke 0.15s; }
+.shape-rect.sel  { stroke: var(--accent); stroke-width: 3; stroke-dasharray: 6,3; }
+.shape-rect.msel { stroke: var(--accent); stroke-width: 2; opacity: 0.85; }
+.shape-text-wrap {
+    width: 100%; height: 100%; display: flex; flex-direction: column;
+    justify-content: center; align-items: center; text-align: center;
+    padding: 4px; line-height: 1.2; overflow: hidden; pointer-events: none;
+}
+.shape-label { font-weight: 800; font-size: 14px; margin-bottom: 2px; }
+.shape-body  { font-weight: 400; font-size: 12px; white-space: pre-wrap; opacity: 0.9; }
+
+/* ── ANCHORS ── */
+.anc-hit { fill: transparent; r: 15; cursor: crosshair; touch-action: none; }
+.anc-vis { fill: var(--bg); stroke: var(--accent); stroke-width: 1.5; r: 0; transition: r 0.2s; pointer-events: none; }
+.shape-group:hover .anc-vis { r: 5; }
+.anc-vis.active { fill: var(--accent); r: 7; }
+
+/* ── CONNECTORS ── */
+.conn     { stroke: #777; stroke-width: 3; fill: none; pointer-events: none; }
+.conn.sel { stroke: var(--accent); stroke-width: 4; }
+.conn-hit { stroke: transparent; stroke-width: 20; fill: none; cursor: pointer; touch-action: none; }
+
+/* ── UI LAYER ── */
+.ui-layer { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 100; }
+.pa { pointer-events: auto; }
+
+.btn-icon {
+    width: 40px; height: 40px; background: var(--panel); color: var(--fg);
+    border: 1px solid var(--inpb); border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; cursor: pointer; margin: 10px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+}
+.btn-icon.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.menu-toggle  { position: absolute; top: 0; right: 0; z-index: 101; }
+.multi-toggle { position: absolute; top: 0; right: 50px; z-index: 101; }
+
+/* ── FAB (bottom-right) ── */
+.fab-wrap {
+    position: absolute; bottom: 40px; right: 20px;
+    display: flex; flex-direction: column-reverse; align-items: center; gap: 15px; z-index: 90;
+}
+.fab-main {
+    width: 56px; height: 56px; background: var(--accent); border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 28px; color: #fff; box-shadow: 0 4px 10px rgba(0,0,0,0.5); cursor: pointer;
+}
+.fab-list { display: flex; flex-direction: column; gap: 10px; opacity: 0; transform: translateY(20px); pointer-events: none; transition: .2s; }
+.fab-wrap.open .fab-list { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.fab-item {
+    display: flex; align-items: center; gap: 10px; background: var(--panel);
+    padding: 8px 16px; border-radius: 20px; border: 1px solid var(--inpb);
+    box-shadow: 0 2px 5px rgba(0,0,0,0.3); cursor: pointer; font-size: 14px;
+}
+
+/* ── OBJECT FAB (bottom-left) ── */
+.obj-fab {
+    position: absolute; bottom: 40px; left: 20px;
+    width: 48px; height: 48px; border-radius: 50%;
+    background: var(--panel); color: var(--fg); border: 1px solid var(--inpb);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px; cursor: pointer; z-index: 90;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+    transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
+}
+.obj-fab.lit { background: var(--accent); color: #fff; border-color: var(--accent); box-shadow: 0 0 18px rgba(222,38,38,.55); }
+
+/* ── OBJECT PANEL ── */
+.obj-panel {
+    position: absolute; bottom: 100px; left: 20px;
+    width: 230px; max-height: 340px; background: var(--panel);
+    border: 1px solid var(--inpb); border-radius: 8px; z-index: 120;
+    display: flex; flex-direction: column;
+    box-shadow: 0 6px 22px rgba(0,0,0,.65);
+    opacity: 0; pointer-events: none;
+    transition: opacity .18s, transform .18s; transform: translateY(8px);
+}
+.obj-panel.open { opacity: 1; pointer-events: auto; transform: translateY(0); }
+.obj-hdr {
+    padding: 8px 12px; background: #181818;
+    border-bottom: 1px solid var(--inpb); border-radius: 8px 8px 0 0;
+    font-size: 11px; font-weight: 700; color: var(--accent);
+    letter-spacing: 1px; text-transform: uppercase;
+    cursor: move; display: flex; justify-content: space-between; align-items: center;
+    touch-action: none;
+}
+.obj-list { overflow-y: auto; flex: 1; padding: 4px; }
+.obj-item {
+    padding: 5px 8px; font-size: 12px; cursor: pointer;
+    border-radius: 4px; display: flex; align-items: center; gap: 5px;
+    white-space: nowrap; overflow: hidden; color: var(--fg);
+}
+.obj-item:hover { background: rgba(128,128,128,.12); }
+.obj-item.active { background: var(--accent); color: #fff; }
+.obj-item.hidden-node { opacity: .35; font-style: italic; }
+.tier-badge {
+    font-size: 9px; padding: 1px 4px; border-radius: 3px;
+    background: #2a2a2a; color: #888; flex-shrink: 0; font-weight: 700;
+}
+.obj-item.active .tier-badge { background: rgba(255,255,255,.2); color: #fff; }
+.obj-lbl { overflow: hidden; text-overflow: ellipsis; flex: 1; }
+.obj-cnt { font-size: 10px; color: #666; flex-shrink: 0; }
+.obj-item.active .obj-cnt { color: rgba(255,255,255,.5); }
+
+/* ── DRAWER ── */
+.drawer {
+    position: absolute; top: 0; right: 0; bottom: 0; width: 300px;
+    background: var(--panel); border-left: 1px solid var(--inpb);
+    transform: translateX(100%); transition: transform .3s cubic-bezier(.2,.8,.2,1);
+    display: flex; flex-direction: column; z-index: 150;
+    box-shadow: -5px 0 20px rgba(0,0,0,.5);
+}
+.drawer.open { transform: translateX(0); }
+.drw-hdr { padding: 15px; border-bottom: 1px solid var(--inpb); display: flex; justify-content: space-between; align-items: center; }
+.drw-body { flex: 1; overflow-y: auto; padding: 15px; }
+.cg { margin-bottom: 20px; border-bottom: 1px solid #333; padding-bottom: 15px; }
+.lbl { display: block; font-size: 11px; text-transform: uppercase; color: #888; margin-bottom: 6px; }
+input[type="text"], textarea, select {
+    width: 100%; background: var(--inp); border: 1px solid var(--inpb);
+    color: var(--fg); padding: 8px; border-radius: 4px; font-family: inherit; font-size: 13px;
+}
+input[type="color"] { width: 100%; height: 35px; border: none; background: none; cursor: pointer; }
+button {
+    width: 100%; padding: 10px; border: none; border-radius: 4px;
+    font-weight: 600; cursor: pointer; background: #333; color: #fff; margin-top: 5px;
+}
+button.red { background: var(--accent); }
+.brow { display: flex; gap: 8px; }
+.chkrow { display: flex; align-items: center; gap: 8px; padding: 6px 0; cursor: pointer; }
+.chkrow input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); flex-shrink: 0; }
+.chkrow span { font-size: 13px; }
+.snap-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 3px; vertical-align: middle; }
+.hier-info { font-size: 12px; color: #888; margin-bottom: 8px; line-height: 1.7; }
+.hier-info b { color: var(--accent); }
+
+/* ── STATUS ── */
+.status-bar {
+    position: absolute; bottom: 0; left: 0; right: 0; height: var(--sh);
+    background: var(--panel); border-top: 1px solid var(--inpb);
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 15px; font-size: 11px; color: #888; z-index: 80;
+}
+
+/* ── LIGHTROOM ── */
+.lightroom {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,.95); z-index: 200;
+    display: flex; flex-direction: column; padding: 20px;
+    opacity: 0; pointer-events: none; transition: opacity .2s;
+}
+.lightroom.open { opacity: 1; pointer-events: auto; }
+.lr-hdr { display: flex; justify-content: space-between; margin-bottom: 20px; border-bottom: 1px solid #444; padding-bottom: 10px; }
+#lr-title { color: var(--accent); margin: 0; }
+#lr-input { flex: 1; font-size: 14px; font-family: monospace; line-height: 1.5; padding: 10px; background: #111; color: #fff; border: 1px solid #333; resize: none; }
+</style>
+</head>
+<body class="light" oncontextmenu="return false;">
+
+<div class="ruler-corner"></div>
+<div class="ruler-h" id="ruler-top"></div>
+<div class="ruler-v" id="ruler-left"></div>
+
+<div id="viewport">
+    <div id="canvas-container">
+        <svg id="canvas"></svg>
+    </div>
+</div>
+
+<!-- ═══ UI LAYER ═══ -->
+<div class="ui-layer">
+    <div class="menu-toggle btn-icon pa" onclick="app.toggleDrawer()">☰</div>
+    <div class="multi-toggle btn-icon pa" id="btn-multi" onclick="app.toggleMulti()">Sel</div>
+
+    <!-- FAB right -->
+    <div class="fab-wrap pa" id="fabWrap">
+        <div class="fab-main" onclick="app.toggleFab()">+</div>
+        <div class="fab-list">
+            <div class="fab-item" onclick="app.addShape()"><span>Add Root Node</span></div>
+            <div class="fab-item" onclick="app.openSchemaView()"><span>Live Schema</span></div>
+            <div class="fab-item" onclick="app.zoom(.1)"><span>Zoom In</span></div>
+            <div class="fab-item" onclick="app.zoom(-.1)"><span>Zoom Out</span></div>
+        </div>
+    </div>
+
+    <!-- Object panel FAB left -->
+    <div class="obj-fab pa" id="obj-fab" onclick="app.toggleObjPanel()" title="Object List">≡</div>
+
+    <!-- Object panel -->
+    <div class="obj-panel pa" id="obj-panel">
+        <div class="obj-hdr pa" id="obj-hdr">
+            <span>Objects</span>
+            <span id="obj-count" style="color:#666;font-weight:400;font-size:10px;letter-spacing:0;"></span>
+        </div>
+        <div class="obj-list" id="obj-list"></div>
+    </div>
+
+    <!-- Properties drawer -->
+    <div class="drawer pa" id="drawer">
+        <div class="drw-hdr">
+            <h3 style="margin:0;color:var(--accent);">PROPERTIES</h3>
+            <div class="btn-icon" style="width:30px;height:30px;margin:0;" onclick="app.toggleDrawer()">✕</div>
+        </div>
+        <div class="drw-body">
+
+            <div class="cg">
+                <span class="lbl">Diagram Name</span>
+                <input type="text" id="inp-name" oninput="app.setName(this.value)" placeholder="Untitled">
+            </div>
+
+            <div id="ctrl-single" style="display:none;">
+                <div class="cg">
+                    <span class="lbl">Content</span>
+                    <input type="text" id="inp-label" oninput="app.upShape('label',this.value)" placeholder="Label">
+                    <button onclick="app.openTextEditor()">Edit Body Text</button>
+                </div>
+                <div class="cg">
+                    <span class="lbl">Hierarchy</span>
+                    <div class="hier-info" id="hier-info"></div>
+                    <button onclick="app.addChildNode()" style="background:#252525;border:1px solid #555;">＋ Add Child Node</button>
+                    <button id="btn-mkroot" onclick="app.makeRoot()" style="background:#252525;border:1px solid #555;display:none;">↑ Make Root Node</button>
+                </div>
+                <div class="cg">
+                    <span class="lbl">Style</span>
+                    <div style="display:flex;gap:5px;">
+                        <input type="color" id="inp-color" onchange="app.upShape('color',this.value)">
+                        <select id="inp-fc" onchange="app.upShape('fontColor',this.value)">
+                            <option value="auto">Auto Text</option>
+                            <option value="#ffffff">White</option>
+                            <option value="#000000">Black</option>
+                            <option value="#DE2626">Red</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="cg">
+                    <span class="lbl">Dimensions</span>
+                    <div class="brow">
+                        <button onclick="app.resize(100,100)">Sq</button>
+                        <button onclick="app.resize(200,100)">Rect</button>
+                        <button onclick="app.resize(300,150)">Lg</button>
+                    </div>
+                    <button onclick="app.resize(600,300)" style="background:#444;">Massive</button>
+                </div>
+            </div>
+
+            <div id="ctrl-conn" style="display:none;">
+                <div class="cg">
+                    <span class="lbl">Line Flow</span>
+                    <select id="inp-flow" onchange="app.upConn('flow',this.value)">
+                        <option value="none">None</option>
+                        <option value="forward">Forward ➜</option>
+                        <option value="backward">Backward ⬅</option>
+                        <option value="bidirectional">Both ↔</option>
+                    </select>
+                </div>
+                <button class="red" onclick="app.deleteSel()">Delete Line</button>
+            </div>
+
+
+            <div class="cg" style="border-top:1px solid #444; padding-top:15px; margin-top:20px;">
+                <span class="lbl" style="color:var(--accent);">Gemini AI Generator</span>
+                <input type="password" id="ai-key" placeholder="Enter Gemini API Key" style="margin-bottom:8px;">
+                <select id="ai-model" style="margin-bottom:8px;">
+                    <option value="gemini-3-flash-preview">Gemini 3 Flash (Preview)</option>
+                    <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Preview)</option>
+                    <option value="gemini-3.1-flash-lite-preview">Gemini 3.1 Flash-Lite (Preview)</option>
+                    <option value="gemini-flash-lite-latest">Gemini Flash-Lite (Latest)</option>
+                    <option value="gemini-2.5-flash" selected>Gemini 2.5 Flash</option>
+                </select>
+                <div class="brow" style="margin-bottom:8px;">
+                    <label class="chkrow" style="flex:1;">
+                        <input type="radio" name="ai-mode" value="append" checked style="width:14px;height:14px;">
+                        <span style="font-size:11px;">Append</span>
+                    </label>
+                    <label class="chkrow" style="flex:1;">
+                        <input type="radio" name="ai-mode" value="replace" style="width:14px;height:14px;">
+                        <span style="font-size:11px;">Overwrite</span>
+                    </label>
+                </div>
+                <textarea id="ai-prompt" placeholder="Describe the diagram you want to build..." style="height:100px; margin-bottom:8px;"></textarea>
+                <button onclick="app.generateDiagram()" class="red">GENERATE DIAGRAM</button>
+                <div id="ai-status" style="font-size:10px; color:#666; margin-top:5px; text-align:center;">AI Ready</div>
+            </div>
+            <div id="ctrl-none" style="text-align:center;color:#888;margin-top:20px;font-size:13px;">No Selection</div>
+
+            <div class="cg" style="margin-top:20px;">
+                <span class="lbl">System</span>
+                <label class="chkrow">
+                    <input type="checkbox" id="chk-snap" checked onchange="app.setSnap(this.checked)">
+                    <span><span class="snap-dot" id="snap-dot"></span>Grid Snap (50px)</span>
+                </label>
+                <button onclick="app.exportData()">Export BEJSON</button>
+                <button style="background:#333;margin-top:5px;position:relative;">
+                    Import BEJSON
+                    <input type="file" accept=".json" onchange="app.importData(this)" style="position:absolute;top:0;left:0;width:100%;height:100%;opacity:0;cursor:pointer;">
+                </button>
+                <button onclick="app.toggleTheme()">Toggle Theme</button>
+                <button id="btn-del" class="red" style="display:none;" onclick="app.deleteSel()">Delete Selected</button>
+                <button onclick="app.showAbout()" style="background:#1a1a1a;border:1px solid #444;margin-top:10px;">About</button>
+            </div>
+        </div>
+    </div>
+</div><!-- /ui-layer -->
+
+<div class="status-bar">
+    <span id="st-l">Ready</span>
+    <span id="st-r">75%</span>
+</div>
+
+<!-- Lightroom -->
+<div class="lightroom" id="lightroom">
+    <div class="lr-hdr">
+        <h2 id="lr-title">Edit</h2>
+        <button onclick="app.closeLightroom()" style="width:auto;padding:5px 15px;">Apply / Done</button>
+    </div>
+    <textarea id="lr-input"></textarea>
+</div>
+
+<!-- About -->
+<div id="about-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.85);z-index:300;justify-content:center;align-items:center;">
+    <div style="background:#1e1e1e;border:1px solid #444;padding:30px;max-width:340px;width:90%;text-align:center;">
+        <div style="color:#DE2626;font-size:22px;font-weight:800;margin-bottom:4px;">BEJSON Diagrammer</div>
+        <div id="about-v" style="font-size:20px;font-weight:700;color:#fff;margin-bottom:4px;"></div>
+        <div style="font-size:12px;color:#666;margin-bottom:20px;">Node Hierarchy Edition</div>
+        <div style="font-size:15px;margin-bottom:8px;"><strong>Elton Boehnen</strong></div>
+        <div style="margin-bottom:8px;"><a href="mailto:boehnenelton2024@gmail.com" style="color:#DE2626;text-decoration:none;">boehnenelton2024@gmail.com</a></div>
+        <div style="margin-bottom:8px;"><a href="https://github.com/boehnenelton" target="_blank" style="color:#DE2626;text-decoration:none;">github.com/boehnenelton</a></div>
+        <div style="margin-bottom:24px;"><a href="https://boehnenelton2024.pages.dev" target="_blank" style="color:#DE2626;text-decoration:none;">boehnenelton2024.pages.dev</a></div>
+        <button onclick="document.getElementById('about-modal').style.display='none'" style="background:#DE2626;color:#fff;width:100%;padding:10px;border:none;font-weight:700;cursor:pointer;">Close</button>
+    </div>
+</div>
+
+<script>
+const VER = "42.0.0";
+
+const app = (() => {
+    // ── STATE ────────────────────────────────────────────
+    const S = {
+        name: "Untitled Diagram",
+        shapes: [], connectors: [],
+        selIds: [], selConn: null,
+        nid: 1, zoom: 0.75,
+        multi: false, snap: true, snapSz: 50,
+        pending: null,  // pending link: {shapeId, anchorIndex}
+        drag: null,     // {startX, startY, initialPos[], active, pointerId}
+        lrMode: null,
+        objOpen: false
+    };
+
+    // ── DOM ──────────────────────────────────────────────
+    const D = {};
+    function initDOM() {
+        D.svg   = document.getElementById('canvas');
+        D.cnt   = document.getElementById('canvas-container');
+        D.vp    = document.getElementById('viewport');
+        D.rt    = document.getElementById('ruler-top');
+        D.rl    = document.getElementById('ruler-left');
+        D.stl   = document.getElementById('st-l');
+        D.str   = document.getElementById('st-r');
+        D.drw   = document.getElementById('drawer');
+        D.fab   = document.getElementById('fabWrap');
+        D.lr    = document.getElementById('lightroom');
+        D.lri   = document.getElementById('lr-input');
+        D.lrt   = document.getElementById('lr-title');
+        D.iname = document.getElementById('inp-name');
+        D.op    = document.getElementById('obj-panel');
+        D.ofab  = document.getElementById('obj-fab');
+        D.ol    = document.getElementById('obj-list');
+        D.oc    = document.getElementById('obj-count');
+    }
+
+    // ── HIERARCHY UTILS ──────────────────────────────────
+    function genOf(id) {
+        let g = 0, cur = S.shapes.find(s => s.id === id);
+        while (cur && cur.parentId) {
+            cur = S.shapes.find(s => s.id === cur.parentId);
+            if (++g > 200) break;
+        }
+        return g;
+    }
+    function childrenOf(pid) { return S.shapes.filter(s => s.parentId === pid); }
+    function descendants(pid, out = new Set()) {
+        childrenOf(pid).forEach(c => { out.add(c.id); descendants(c.id, out); });
+        return out;
+    }
+    function hiddenSet() {
+        const h = new Set();
+        S.shapes.forEach(s => { if (s.collapsed) descendants(s.id).forEach(id => h.add(id)); });
+        return h;
+    }
+
+    // ── SNAP ─────────────────────────────────────────────
+    function snp(v) { return S.snap ? Math.round(v / S.snapSz) * S.snapSz : v; }
+
+    // ── INIT ─────────────────────────────────────────────
+    function init() {
+        initDOM();
+        drawRulers();
+        D.cnt.style.transform = `scale(${S.zoom})`;
+        D.str.innerText = Math.round(S.zoom * 100) + '%';
+
+        // Credit node
+        S.shapes.push({
+            id:'s'+(S.nid++), x:100, y:100, w:320, h:160,
+            color:'#1e1e1e', fontColor:'#ffffff',
+            label:'Elton Boehnen',
+            text:'boehnenelton2024@gmail.com\ngithub.com/boehnenelton\nhttps://boehnenelton2024.pages.dev',
+            parentId:null, collapsed:false
+        });
+        sel([S.shapes[0].id]);
+
+        // Window-level pointer handlers (no capture needed)
+        window.addEventListener('pointermove', onMove, { passive: false });
+        window.addEventListener('pointerup',   onUp);
+        window.addEventListener('pointercancel', onUp);
+        D.svg.addEventListener('pointerdown', onBg);
+        D.vp.addEventListener('scroll', updateRulers);
+
+        setupObjDrag();
+        render();
+        renderObj();
+    }
+
+    // ── ADD SHAPES ───────────────────────────────────────
+    // Tier-based default sizes
+    const TIER_SIZE = [
+        {w:200,h:120}, {w:160,h:100}, {w:130,h:80}, {w:110,h:70}, {w:90,h:60}
+    ];
+    function tsz(gen) { return TIER_SIZE[Math.min(gen, TIER_SIZE.length-1)]; }
+
+    function addShape(cx, cy) {
+        if (cx === undefined) {
+            const r = D.vp.getBoundingClientRect();
+            cx = (D.vp.scrollLeft + r.width/2) / S.zoom - 100;
+            cy = (D.vp.scrollTop  + r.height/2) / S.zoom - 60;
+        }
+        const sz = tsz(0);
+        const s = {
+            id:'s'+(S.nid++), x:snp(cx), y:snp(cy), w:sz.w, h:sz.h,
+            color:'#334', fontColor:'auto',
+            label:'Node '+S.nid, text:'',
+            parentId:null, collapsed:false
+        };
+        S.shapes.push(s);
+        sel([s.id]); render(); renderObj();
+    }
+
+    function addChildNode() {
+        if (S.selIds.length !== 1) return;
+        const pid = S.selIds[0];
+        const par = S.shapes.find(s => s.id === pid);
+        if (!par) return;
+        const gen = genOf(pid) + 1;
+        const sz  = tsz(gen);
+        const pos = autoPlace(par, sz);
+
+        const CCOLS = ['#2a3a5c','#1a4a2a','#4a3a1a','#3a1a4a','#334'];
+        const color = CCOLS[Math.min(gen-1, CCOLS.length-1)];
+
+        const s = {
+            id:'s'+(S.nid++), x:pos.x, y:pos.y, w:sz.w, h:sz.h,
+            color, fontColor:'auto',
+            label:'Node '+S.nid, text:'',
+            parentId:pid, collapsed:false
+        };
+        S.shapes.push(s);
+
+        // Auto-connect parent bottom-center → child top-center
+        S.connectors.push({
+            id:'c'+Date.now()+Math.random().toString(36).slice(2),
+            from:{shapeId:pid, anchorIndex:5},
+            to:{shapeId:s.id,  anchorIndex:1},
+            flow:'forward'
+        });
+
+        sel([s.id]); render(); renderObj();
+    }
+
+    function autoPlace(par, sz) {
+        const GAP_Y=80, GAP_X=20;
+        const sibs = childrenOf(par.id);
+        let x, y;
+        if (!sibs.length) {
+            x = par.x + par.w/2 - sz.w/2;
+            y = par.y + par.h + GAP_Y;
+        } else {
+            const re = sibs.reduce((m,s)=>Math.max(m,s.x+s.w), 0);
+            x = re + GAP_X; y = sibs[0].y;
+        }
+        x = snp(x); y = snp(y);
+        // Collision nudge
+        for (let i=0; i<25; i++) {
+            const hit = S.shapes.find(s =>
+                s.x < x+sz.w+8 && s.x+s.w > x-8 &&
+                s.y < y+sz.h+8 && s.y+s.h > y-8
+            );
+            if (!hit) break;
+            hit.x = snp(hit.x + sz.w + GAP_X);
+        }
+        return {x, y};
+    }
+
+    function makeRoot() {
+        S.selIds.forEach(id => {
+            const s = S.shapes.find(x=>x.id===id);
+            if (s) s.parentId = null;
+        });
+        render(); renderObj(); updateUI();
+    }
+
+    function toggleCollapse(e, id) {
+        e.stopPropagation();
+        const s = S.shapes.find(x=>x.id===id);
+        if (s) { s.collapsed = !s.collapsed; render(); renderObj(); }
+    }
+
+    // ── SELECTION ────────────────────────────────────────
+    function sel(ids) {
+        S.selConn = null;
+        if (S.multi) {
+            ids.forEach(id => {
+                if (S.selIds.includes(id)) S.selIds = S.selIds.filter(x=>x!==id);
+                else S.selIds.push(id);
+            });
+        } else {
+            S.selIds = ids;
+        }
+        updateUI(); render();
+    }
+
+    function selFromPanel(e, id) {
+        e.stopPropagation();
+        sel([id]);
+        const s = S.shapes.find(x=>x.id===id);
+        if (s) {
+            D.vp.scrollLeft = Math.max(0, s.x * S.zoom - 120);
+            D.vp.scrollTop  = Math.max(0, s.y * S.zoom - 120);
+        }
+        renderObj();
+    }
+
+    // ── DRAG (THE FIX) ───────────────────────────────────
+    // Key: e.preventDefault() on pointerdown stops the browser claiming
+    // the touch gesture as a viewport scroll. No pointer capture is used —
+    // it gets invalidated when render() destroys the SVG element mid-drag.
+    // Window-level pointermove/pointerup are sufficient.
+
+    function onShapeDown(e, id) {
+        e.stopPropagation();
+        e.preventDefault();   // ← THE FIX: prevents viewport scroll claiming the gesture
+
+        if (!S.multi && !S.selIds.includes(id)) {
+            S.selIds = [id]; updateUI(); render();
+        }
+
+        const movIds = [...S.selIds];
+        S.drag = {
+            startX: e.clientX, startY: e.clientY, active: false,
+            init: movIds.map(mid => {
+                const s = S.shapes.find(x=>x.id===mid);
+                return { id:mid, x:s.x, y:s.y };
+            })
+        };
+    }
+
+    function onMove(e) {
+        if (!S.drag) return;
+        const dx = (e.clientX - S.drag.startX) / S.zoom;
+        const dy = (e.clientY - S.drag.startY) / S.zoom;
+        if (!S.drag.active && Math.hypot(dx,dy) > 3) S.drag.active = true;
+        if (S.drag.active) {
+            e.preventDefault();
+            S.drag.init.forEach(p => {
+                const s = S.shapes.find(x=>x.id===p.id);
+                if (s) { s.x = snp(p.x+dx); s.y = snp(p.y+dy); }
+            });
+            render();
+        }
+    }
+
+    function onUp() {
+        S.drag = null;
+        renderObj();
+    }
+
+    function onBg(e) {
+        if (e.target === D.svg) {
+            S.selIds = []; S.selConn = null; S.pending = null;
+            updateUI(); render();
+        }
+    }
+
+    // ── ANCHORS & CONNECTORS ─────────────────────────────
+    function onAnchorDown(e, shapeId, idx) {
+        e.stopPropagation(); e.preventDefault();
+        if (S.pending) {
+            if (S.pending.shapeId !== shapeId) {
+                const p = S.pending;
+                const dup = S.connectors.some(c =>
+                    (c.from.shapeId===p.shapeId && c.from.anchorIndex===p.anchorIndex &&
+                     c.to.shapeId===shapeId && c.to.anchorIndex===idx) ||
+                    (c.from.shapeId===shapeId && c.from.anchorIndex===idx &&
+                     c.to.shapeId===p.shapeId && c.to.anchorIndex===p.anchorIndex)
+                );
+                if (!dup) {
+                    S.connectors.push({
+                        id:'c'+Date.now()+Math.random().toString(36).slice(2),
+                        from:p, to:{shapeId, anchorIndex:idx}, flow:'none'
+                    });
+                } else {
+                    D.stl.innerText = '⚠ Duplicate blocked';
+                    setTimeout(()=>{ D.stl.innerText='Ready'; }, 2000);
+                }
+            }
+            S.pending = null; D.stl.innerText='Ready';
+        } else {
+            S.pending = {shapeId, anchorIndex:idx};
+            D.stl.innerText = 'Tap target anchor…';
+        }
+        render();
+    }
+
+    function onConnDown(e, id) {
+        e.stopPropagation();
+        S.selIds = []; S.selConn = id;
+        updateUI(); render();
+    }
+
+    // ── RENDER ───────────────────────────────────────────
+    const GEN_COL = ['transparent','#2a6496','#2e7d32','#e65100','#6a1a8a'];
+
+    function render() {
+        const hidden = hiddenSet();
+        let h = `<defs>
+            <marker id="me"  markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#888"/></marker>
+            <marker id="ms"  markerWidth="10" markerHeight="10" refX="1" refY="3" orient="auto"><path d="M9,0 L9,6 L0,3 z" fill="#888"/></marker>
+            <marker id="mes" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#DE2626"/></marker>
+            <marker id="mss" markerWidth="10" markerHeight="10" refX="1" refY="3" orient="auto"><path d="M9,0 L9,6 L0,3 z" fill="#DE2626"/></marker>
+        </defs>`;
+
+        // Connectors
+        S.connectors.forEach(c => {
+            const s1 = S.shapes.find(x=>x.id===c.from.shapeId);
+            const s2 = S.shapes.find(x=>x.id===c.to.shapeId);
+            if (!s1||!s2||hidden.has(s1.id)||hidden.has(s2.id)) return;
+            const p1 = anchorPos(s1, c.from.anchorIndex);
+            const p2 = anchorPos(s2, c.to.anchorIndex);
+            const sel = S.selConn === c.id;
+            let mk = '';
+            if (c.flow==='forward'||c.flow==='bidirectional') mk+=` marker-end="${sel?'url(#mes)':'url(#me)'}"`;
+            if (c.flow==='backward'||c.flow==='bidirectional') mk+=` marker-start="${sel?'url(#mss)':'url(#ms)'}"`;
+            h += `<line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y}" class="conn${sel?' sel':''}" ${mk} pointer-events="none"/>`;
+            h += `<line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y}" class="conn-hit" onpointerdown="app.connDown(event,'${c.id}')"/>`;
+        });
+
+        // Shapes
+        S.shapes.forEach(s => {
+            if (hidden.has(s.id)) return;
+            const isSel = S.selIds.includes(s.id);
+            const tc   = textCol(s);
+            const gen  = genOf(s.id);
+            const sc   = GEN_COL[Math.min(gen, GEN_COL.length-1)];
+            const kids = childrenOf(s.id);
+
+            h += `<g transform="translate(${s.x},${s.y})" class="shape-group" onpointerdown="app.shapeDown(event,'${s.id}')">`;
+            h += `<rect width="${s.w}" height="${s.h}" fill="${s.color}" class="shape-rect ${isSel?(S.multi?'msel':'sel'):''}"/>`;
+            if (gen>0) h += `<rect x="0" y="0" width="${s.w}" height="5" fill="${sc}" pointer-events="none"/>`;
+
+            const tp = gen>0 ? 9 : 4;
+            h += `<foreignObject width="${s.w}" height="${s.h}" style="pointer-events:none;overflow:hidden;">
+                <div xmlns="http://www.w3.org/1999/xhtml" class="shape-text-wrap" style="color:${tc};padding-top:${tp}px;">
+                    <div class="shape-label">${esc(s.label)}</div>
+                    ${s.text?`<div class="shape-body">${esc(s.text)}</div>`:''}
+                </div>
+            </foreignObject>`;
+
+            // Collapse/expand button
+            if (kids.length) {
+                const BW=24,BH=20,BX=s.w-BW-3,BY=3;
+                const ico = s.collapsed ? '▶' : '▼';
+                const bf  = s.collapsed ? '#DE2626' : 'rgba(0,0,0,.45)';
+                h += `<g onpointerdown="app.toggleCollapse(event,'${s.id}')" style="cursor:pointer;">
+                    <rect x="${BX}" y="${BY}" width="${BW}" height="${BH}" rx="4" fill="${bf}" stroke="#555" stroke-width="0.5"/>
+                    <text x="${BX+BW/2}" y="${BY+14}" text-anchor="middle" fill="white" font-size="10" font-family="monospace" pointer-events="none">${ico}</text>
+                </g>`;
+            }
+
+            // Anchors (show when selected or pending link)
+            if (isSel || S.pending) {
+                for (let i=0; i<8; i++) {
+                    const p = relAnch(s.w, s.h, i);
+                    const ac = (S.pending?.shapeId===s.id && S.pending.anchorIndex===i) ? ' active' : '';
+                    h += `<circle cx="${p.x}" cy="${p.y}" class="anc-vis${ac}"/>`;
+                    h += `<circle cx="${p.x}" cy="${p.y}" class="anc-hit" onpointerdown="app.anchorDown(event,'${s.id}',${i})"/>`;
+                }
+            }
+            h += `</g>`;
+        });
+
+        D.svg.innerHTML = h;
+    }
+
+    // ── UI UPDATE ────────────────────────────────────────
+    function updateUI() {
+        const n = S.selIds.length, isConn = !!S.selConn;
+        document.getElementById('ctrl-none').style.display   = (!n && !isConn) ? 'block' : 'none';
+        document.getElementById('ctrl-single').style.display = n===1 ? 'block' : 'none';
+        document.getElementById('ctrl-conn').style.display   = isConn ? 'block' : 'none';
+        document.getElementById('btn-del').style.display     = n>0 ? 'block' : 'none';
+
+        if (n===1) {
+            const s = S.shapes.find(x=>x.id===S.selIds[0]);
+            if (s) {
+                document.getElementById('inp-label').value = s.label;
+                document.getElementById('inp-color').value = s.color;
+                document.getElementById('inp-fc').value    = s.fontColor;
+                const gen  = genOf(s.id);
+                const kids = childrenOf(s.id);
+                const hi   = document.getElementById('hier-info');
+                const mkr  = document.getElementById('btn-mkroot');
+                if (s.parentId) {
+                    const par = S.shapes.find(x=>x.id===s.parentId);
+                    hi.innerHTML = `Parent: <b>${esc(par?par.label:'?')}</b><br>Tier: <b>T${gen}</b> · Children: <b>${kids.length}</b>`;
+                    mkr.style.display='block';
+                } else {
+                    hi.innerHTML = `<span style="color:#aaa;">Root Node</span> · Children: <b>${kids.length}</b>`;
+                    mkr.style.display='none';
+                }
+            }
+        }
+        if (isConn) {
+            const c = S.connectors.find(x=>x.id===S.selConn);
+            if (c) document.getElementById('inp-flow').value = c.flow||'none';
+        }
+        D.stl.innerText = n>0 ? `${n} Selected` : isConn ? 'Line Selected' : 'Ready';
+        D.iname.value = S.name;
+    }
+
+    // ── OBJECT PANEL ─────────────────────────────────────
+    function toggleObjPanel() {
+        S.objOpen = !S.objOpen;
+        D.op.classList.toggle('open', S.objOpen);
+        D.ofab.classList.toggle('lit', S.objOpen);
+        if (S.objOpen) renderObj();
+    }
+
+    function renderObj() {
+        if (!D.ol || !S.objOpen) return;
+        const hidden = hiddenSet();
+        let h = '', n = 0;
+
+        function row(s, depth) {
+            n++;
+            const isSel = S.selIds.includes(s.id);
+            const isH   = hidden.has(s.id);
+            const kids  = childrenOf(s.id);
+            const tb    = depth>0 ? `<span class="tier-badge">T${depth}</span>` : '';
+            const ci    = kids.length ? (s.collapsed?'▶ ':'▼ ') : '';
+            const kc    = kids.length ? `<span class="obj-cnt">(${kids.length})</span>` : '';
+            h += `<div class="obj-item${isSel?' active':''}${isH?' hidden-node':''}"
+                style="padding-left:${6+depth*13}px;"
+                onpointerdown="app.selPanel(event,'${s.id}')">
+                ${tb}<span class="obj-lbl">${ci}${esc(s.label)}</span>${kc}
+            </div>`;
+            kids.forEach(c => row(c, depth+1));
+        }
+
+        const valid = new Set(S.shapes.map(s=>s.id));
+        S.shapes.filter(s=>!s.parentId||!valid.has(s.parentId)).forEach(s=>row(s,0));
+        D.ol.innerHTML = h || `<div style="color:#888;padding:10px;text-align:center;font-size:12px;">No nodes</div>`;
+        D.oc.textContent = `${n} node${n!==1?'s':''}`;
+    }
+
+    function setupObjDrag() {
+        const hdr = document.getElementById('obj-hdr');
+        let dg = null;
+        hdr.addEventListener('pointerdown', e => {
+            const r = D.op.getBoundingClientRect();
+            D.op.style.bottom = 'auto';
+            D.op.style.top  = r.top+'px';
+            D.op.style.left = r.left+'px';
+            dg = {sx:e.clientX,sy:e.clientY,ox:r.left,oy:r.top};
+            try { hdr.setPointerCapture(e.pointerId); } catch(_){}
+            e.preventDefault();
+        });
+        hdr.addEventListener('pointermove', e => {
+            if (!dg) return;
+            const W=D.op.offsetWidth, H=D.op.offsetHeight;
+            D.op.style.left = Math.max(0,Math.min(innerWidth-W,  dg.ox+e.clientX-dg.sx))+'px';
+            D.op.style.top  = Math.max(0,Math.min(innerHeight-H, dg.oy+e.clientY-dg.sy))+'px';
+        });
+        hdr.addEventListener('pointerup',     ()=>{ dg=null; });
+        hdr.addEventListener('pointercancel', ()=>{ dg=null; });
+    }
+
+    // ── MUTATIONS ────────────────────────────────────────
+    function upShape(key, val) {
+        S.selIds.forEach(id => {
+            const s=S.shapes.find(x=>x.id===id); if(s) s[key]=val;
+        });
+        render(); renderObj();
+    }
+    function upConn(key, val) {
+        if (S.selConn) {
+            const c=S.connectors.find(x=>x.id===S.selConn); if(c) c[key]=val; render();
+        }
+    }
+    function resize(w,h) {
+        S.selIds.forEach(id=>{ const s=S.shapes.find(x=>x.id===id); if(s){s.w=w;s.h=h;} });
+        render();
+    }
+    function deleteSel() {
+        if (S.selConn) {
+            S.connectors = S.connectors.filter(c=>c.id!==S.selConn);
+            S.selConn = null;
+        } else {
+            S.selIds.forEach(did => {
+                const s=S.shapes.find(x=>x.id===did); if(!s) return;
+                childrenOf(did).forEach(c=>{ c.parentId=s.parentId; });
+            });
+            S.connectors = S.connectors.filter(c=>
+                !S.selIds.includes(c.from.shapeId) && !S.selIds.includes(c.to.shapeId)
+            );
+            S.shapes = S.shapes.filter(s=>!S.selIds.includes(s.id));
+            S.selIds = [];
+        }
+        updateUI(); render(); renderObj();
+    }
+
+    // ── SETTINGS ─────────────────────────────────────────
+    function setSnap(on) {
+        S.snap = on;
+        document.getElementById('snap-dot').style.background = on ? 'var(--accent)' : '#888';
+        D.stl.innerText = `Snap ${on?'ON':'OFF'}`;
+        setTimeout(()=>{ D.stl.innerText='Ready'; },1500);
+    }
+
+    // ── UTILS ────────────────────────────────────────────
+    function anchorPos(s,i) {
+        const xm=s.x+s.w/2, ym=s.y+s.h/2;
+        return [{x:s.x,y:s.y},{x:xm,y:s.y},{x:s.x+s.w,y:s.y},{x:s.x+s.w,y:ym},
+                {x:s.x+s.w,y:s.y+s.h},{x:xm,y:s.y+s.h},{x:s.x,y:s.y+s.h},{x:s.x,y:ym}][i] || {x:xm,y:ym};
+    }
+    function relAnch(w,h,i) {
+        const xm=w/2,ym=h/2;
+        return [{x:0,y:0},{x:xm,y:0},{x:w,y:0},{x:w,y:ym},
+                {x:w,y:h},{x:xm,y:h},{x:0,y:h},{x:0,y:ym}][i] || {x:xm,y:ym};
+    }
+    function textCol(s) {
+        if (s.fontColor!=='auto') return s.fontColor;
+        const hx=s.color.replace('#','');
+        const r=parseInt(hx.substr(0,2),16),g=parseInt(hx.substr(2,2),16),b=parseInt(hx.substr(4,2),16);
+        return ((r*299+g*587+b*114)/1000)>=128 ? '#000' : '#fff';
+    }
+    function esc(str) {
+        return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function drawRulers() {
+        D.rt.innerHTML=''; D.rl.innerHTML='';
+        for(let i=0;i<2000;i+=100){
+            const t=document.createElement('div'); t.className='tick tick-h'; t.style.left=(i*S.zoom)+'px'; t.innerText=i; D.rt.appendChild(t);
+            const l=document.createElement('div'); l.className='tick tick-v'; l.style.top=(i*S.zoom)+'px'; l.innerText=i; D.rl.appendChild(l);
+        }
+    }
+    function updateRulers() {
+        D.rt.style.left = (-D.vp.scrollLeft)+'px';
+        D.rl.style.top  = (-D.vp.scrollTop)+'px';
+    }
+
+    // ── LIGHTROOM ────────────────────────────────────────
+    function openTextEditor() {
+        if (S.selIds.length!==1) return;
+        S.lrMode='text'; D.lrt.innerText='Edit Body Text';
+        D.lri.value = S.shapes.find(x=>x.id===S.selIds[0])?.text||'';
+        D.lr.classList.add('open');
+    }
+    function openSchemaView() {
+        S.lrMode='schema'; D.lrt.innerText='Live Schema (BEJSON)';
+        D.lri.value = JSON.stringify(toBEJSON(),null,2);
+        D.lr.classList.add('open');
+    }
+    function closeLightroom() {
+        if (S.lrMode==='text') {
+            const s=S.shapes.find(x=>x.id===S.selIds[0]); if(s) s.text=D.lri.value; render();
+        } else if (S.lrMode==='schema') {
+            try { fromBEJSON(JSON.parse(D.lri.value)); }
+            catch(e){ alert('Invalid JSON: '+e.message); return; }
+        }
+        D.lr.classList.remove('open'); S.lrMode=null;
+    }
+
+    // ── BEJSON IO ────────────────────────────────────────
+    function toBEJSON() {
+        return {
+            Format:"BEJSON", Format_Version:"104db", Format_Creator:"Elton Boehnen",
+            Records_Type:["Shape","Connector"],
+            Fields:[
+                {name:"Record_Type_Parent",type:"string"},
+                {name:"id",type:"string",Record_Type_Parent:"Shape"},
+                {name:"x",type:"number",Record_Type_Parent:"Shape"},
+                {name:"y",type:"number",Record_Type_Parent:"Shape"},
+                {name:"w",type:"number",Record_Type_Parent:"Shape"},
+                {name:"h",type:"number",Record_Type_Parent:"Shape"},
+                {name:"label",type:"string",Record_Type_Parent:"Shape"},
+                {name:"color",type:"string",Record_Type_Parent:"Shape"},
+                {name:"fontColor",type:"string",Record_Type_Parent:"Shape"},
+                {name:"text",type:"string",Record_Type_Parent:"Shape"},
+                {name:"parentId",type:"string",Record_Type_Parent:"Shape"},
+                {name:"generation",type:"integer",Record_Type_Parent:"Shape"},
+                {name:"collapsed",type:"boolean",Record_Type_Parent:"Shape"},
+                {name:"id",type:"string",Record_Type_Parent:"Connector"},
+                {name:"from",type:"string",Record_Type_Parent:"Connector"},
+                {name:"fromIdx",type:"integer",Record_Type_Parent:"Connector"},
+                {name:"to",type:"string",Record_Type_Parent:"Connector"},
+                {name:"toIdx",type:"integer",Record_Type_Parent:"Connector"},
+                {name:"flow",type:"string",Record_Type_Parent:"Connector"}
+            ],
+            Values:[
+                ...S.shapes.map(s=>[
+                    "Shape",s.id,s.x,s.y,s.w,s.h,s.label,s.color,s.fontColor,s.text,
+                    s.parentId||null,genOf(s.id),s.collapsed||false,
+                    null,null,null,null,null,null
+                ]),
+                ...S.connectors.map(c=>[
+                    "Connector",
+                    null,null,null,null,null,null,null,null,null,null,null,null,
+                    c.id,c.from.shapeId,c.from.anchorIndex,c.to.shapeId,c.to.anchorIndex,c.flow
+                ])
+            ]
+        };
+    }
+
+    function fromBEJSON(j, nameHint) {
+        S.shapes=[]; S.connectors=[];
+        if (nameHint) S.name = nameHint.replace(/\.json$/i, '');
+        else if (j.Diagram_Name) S.name = j.Diagram_Name;
+        const m={};
+        (j.Fields||[]).forEach((f,i)=>m[f.name+(f.Record_Type_Parent?'_'+f.Record_Type_Parent:'')]=i);
+        (j.Values||[]).forEach(v=>{
+            if (v[0]==="Shape") {
+                S.shapes.push({
+                    id:v[m["id_Shape"]], x:v[m["x_Shape"]]||0, y:v[m["y_Shape"]]||0,
+                    w:v[m["w_Shape"]]||100, h:v[m["h_Shape"]]||100,
+                    label:v[m["label_Shape"]]||'', color:v[m["color_Shape"]]||'#333',
+                    fontColor:v[m["fontColor_Shape"]]||'auto', text:v[m["text_Shape"]]||'',
+                    parentId:v[m["parentId_Shape"]]||null, collapsed:v[m["collapsed_Shape"]]||false
+                });
+            } else if (v[0]==="Connector") {
+                S.connectors.push({
+                    id:v[m["id_Connector"]],
+                    from:{shapeId:v[m["from_Connector"]],anchorIndex:v[m["fromIdx_Connector"]]},
+                    to:{shapeId:v[m["to_Connector"]],anchorIndex:v[m["toIdx_Connector"]]},
+                    flow:v[m["flow_Connector"]]||'none'
+                });
+            }
+            // Group rows from v25 silently skipped
+        });
+        S.nid = S.shapes.reduce((mx,s)=>Math.max(mx,(parseInt(s.id.replace(/\D/g,''))||0)+1),S.nid);
+        updateUI(); render(); renderObj();
+    }
+
+    function exportData() {
+        const b=new Blob([JSON.stringify(toBEJSON(),null,2)],{type:"application/json"});
+        const a=document.createElement('a');
+        a.href=URL.createObjectURL(b);
+        a.download=S.name.replace(/[^a-z0-9]/gi,'_').toLowerCase()+'.json';
+        a.click();
+    }
+    function importData(inp) {
+        const f=inp.files[0]; if(!f) return;
+        const r=new FileReader();
+        r.onload=e=>{ try{fromBEJSON(JSON.parse(e.target.result), f.name);}catch(e){alert('Import error: '+e.message);} };
+        r.readAsText(f);
+    }
+
+    async function generateDiagram() {
+        const key = document.getElementById('ai-key').value;
+        const model = document.getElementById('ai-model').value;
+        const prompt = document.getElementById('ai-prompt').value;
+        const status = document.getElementById('ai-status');
+        const mode = document.querySelector('input[name="ai-mode"]:checked').value;
+
+        if (!key) { alert("Please enter an API Key"); return; }
+        if (!prompt) { alert("Please enter a prompt"); return; }
+
+        status.innerText = "Generating...";
+        status.style.color = "var(--accent)";
+
+        const systemInstruction = `You are the BEJSON Diagrammer AI. Your core mission is to generate complex node diagrams following the strict BEJSON 104db tabular standard.
+
+### DATA STRUCTURES (STRICT):
+1. Shapes (Entity: 'Shape'):
+   - id: unique string starting with 's' (e.g. s1, s2)
+   - x, y: numbers (MUST be multiples of 50)
+   - w, h: numbers (width/height, e.g. 200, 120)
+   - color, fontColor: hex strings
+   - label: Title string
+   - text: Body string (use \\n for line breaks)
+   - parentId: id of parent shape or null
+   - collapsed: boolean
+
+2. Connectors (Entity: 'Connector'):
+   - id: unique string starting with 'c' (e.g. c1, c2)
+   - from, to: { shapeId: string, anchorIndex: number }
+   - anchorIndex: 0=Top, 1=Right, 2=Bottom, 3=Left.
+   - flow: 'none', 'forward', 'backward', 'bidirectional'
+
+### RULES:
+- Respond ONLY with a clean JSON object: { "shapes": [...], "connectors": [...] }.
+- ${mode === 'replace' ? 'Mode: OVERWRITE. Create a completely new diagram.' : 'Mode: APPEND. Add to existing with unique IDs.'}
+- Spacing: Ensure nodes are at least 200px apart.`;
+
+        try {
+            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text: prompt }] }],
+                    system_instruction: { parts: [{ text: systemInstruction }] }
+                })
+            });
+
+            if (!res.ok) throw new Error("API Error: " + res.status);
+            const data = await res.json();
+            const rawText = data.candidates[0].content.parts[0].text;
+            const match = rawText.match(/\{[\s\S]*\}/);
+            if (!match) throw new Error("No JSON in response");
+            
+            const diagram = JSON.parse(match[0]);
+            if (mode === 'replace') { S.shapes = []; S.connectors = []; }
+
+            const toArr = (x) => Array.isArray(x) ? x : (x && typeof x === 'object' ? Object.values(x) : []);
+            const shapes = toArr(diagram.shapes);
+            const connectors = toArr(diagram.connectors);
+
+            shapes.forEach(s => { if (s && s.id && !S.shapes.some(x => x.id === s.id)) S.shapes.push(s); });
+            connectors.forEach(c => { if (c && c.id && !S.connectors.some(x => x.id === c.id)) S.connectors.push(c); });
+
+            status.innerText = "Success!";
+            status.style.color = "#4CAF50";
+            setTimeout(() => { status.innerText = "AI Ready"; status.style.color = "#666"; }, 3000);
+            render(); renderObj(); updateUI();
+        } catch (e) {
+            status.innerText = "Error: " + e.message;
+            status.style.color = "#F44336";
+        }
+    }
+
+    // ── PUBLIC API ───────────────────────────────────────
+    return {
+        init, addShape, addChildNode, makeRoot,
+        toggleCollapse, selPanel: selFromPanel,
+        shapeDown:  onShapeDown,
+        anchorDown: onAnchorDown,
+        connDown:   onConnDown,
+        toggleDrawer:  ()=>D.drw.classList.toggle('open'),
+        toggleFab:     ()=>D.fab.classList.toggle('open'),
+        toggleObjPanel,
+        toggleMulti: ()=>{
+            S.multi=!S.multi;
+            document.getElementById('btn-multi').classList.toggle('active');
+            if(!S.multi&&S.selIds.length>1){S.selIds=[S.selIds[0]];render();}
+        },
+        toggleTheme: ()=>document.body.classList.toggle('light'),
+        showAbout: ()=>{
+            document.getElementById('about-v').textContent='v'+VER;
+            document.getElementById('about-modal').style.display='flex';
+        },
+        zoom: d=>{
+            S.zoom=Math.max(.2,Math.min(3,S.zoom+d));
+            D.cnt.style.transform=`scale(${S.zoom})`;
+            drawRulers(); D.str.innerText=Math.round(S.zoom*100)+'%';
+        },
+        setSnap, setName: v=>{ S.name=v; },
+        upShape, upConn, resize, deleteSel,
+        openTextEditor, openSchemaView, closeLightroom,
+        exportData, importData, generateDiagram
+    };
+})();
+
+app.init();
+</script>
+</body>
+</html>

@@ -1,0 +1,482 @@
+
+
+
+Understanding BEJSON: The Anatomy of Positional Integrity
+
+1. Introduction: What is Positional Integrity?
+
+As a Senior Technical Educator and Data Architect, I often see systems struggle under the weight of redundant metadata. Traditional JSON, while flexible, is inherently bloated because it repeats keys for every single record. BEJSON (Boehnen Elton JSON) is a strict, self-describing tabular data format designed to solve this by enforcing Positional Integrity.
+
+Positional Integrity is the architectural requirement that the physical order of data elements within a record must precisely align with a predefined schema at the top of the file. By decoupling the "structure" from the "data," BEJSON eliminates the need for repeated keys, enabling rapid parsing and direct index-based access.
+
+Key Insight: Why Index-Based Access Matters In standard JSON, a parser must perform a "key lookup" (a string search or hash table hit) for every property in every object. This adds significant CPU overhead. In BEJSON, the computer knows that "Price" is at index [3]. Index-based access is an O(1) operation, meaning the time to find data is constant regardless of how many keys the schema contains. This makes BEJSON exceptionally performant for large datasets and easily digestible by LLMs and native programming languages.
+
+This shift from key-value pairs to strict alignment transforms the file into a lightweight, high-performance database while remaining human-readable.
+
+
+--------------------------------------------------------------------------------
+
+
+2. The Blueprint: The Fields Array
+
+In the BEJSON architecture, the Fields array serves as the Single Source of Truth (SSOT). It functions as an internal schema, defining the name and data type for every piece of information once and for all at the top level. This design choice eliminates the need for external .xsd or .json schema files.
+
+Validation Rules for the Blueprint:
+
+1. Strict Creator: For any BEJSON document to be valid, the Format_Creator must be precisely "Elton Boehnen".
+2. No Duplicates: Field names must be unique within the array; duplicate names will cause a hard validation failure.
+3. Type Restrictions: BEJSON supports six types, but your choice of version matters:
+  * BEJSON 104 & 104db: Support all types (string, integer, number, boolean, array, object).
+  * BEJSON 104a: Is strictly limited to primitive types (string, integer, number, boolean).
+
+Example Blueprint: SensorReading
+
+If we define an environmental monitoring system, our Fields array would look like this:
+
+Field Name	Data Type	Record_Type_Parent (104db only)	Description
+sensor_id	string	"SensorReading"	Unique hardware ID
+timestamp	string	"SensorReading"	ISO 8601 UTC time
+temperature	number	"SensorReading"	Floating point reading
+tags	array	"SensorReading"	List of string labels
+
+Once this blueprint is set, the actual data must follow it perfectly. Any deviation in order, count, or type results in a broken document.
+
+
+--------------------------------------------------------------------------------
+
+
+3. The Cargo: The Values Array
+
+If Fields is the blueprint, the Values array is the cargo. In BEJSON, records are stored as arrays of raw values rather than objects. To maintain the integrity of the file, every record within the Values array must adhere to two absolute constraints:
+
+1. Exact Length Match: If the Fields array defines 10 fields, every record in Values must contain exactly 10 elements. An array that is too short or too long breaks the index mapping.
+2. Type Integrity: Each value must match the type declared at its corresponding index in the Fields array. However, null is a valid value for any declared type, serving as a critical structural tool.
+
+
+--------------------------------------------------------------------------------
+
+
+4. The Logic of Alignment: Why Order is Everything
+
+The synchronization between the Fields and Values indices is where the efficiency gain is realized. In the 104db multi-entity format, this alignment is even more critical because the file can store different types of entities (e.g., Users and Items) in a single array.
+
+Observe how the value "alice" is mapped to its field name strictly by its position at index [3]. Note that in 104db, every field except the discriminator itself must specify its Record_Type_Parent.
+
+{
+  "Format": "BEJSON",
+  "Format_Version": "104db",
+  "Format_Creator": "Elton Boehnen",
+  "Records_Type": ["User", "Item"],
+  "Fields": [
+    {"name": "Record_Type_Parent", "type": "string"},
+    {"name": "created", "type": "string", "Record_Type_Parent": "User"},
+    {"name": "user_id", "type": "string", "Record_Type_Parent": "User"},
+    {"name": "username", "type": "string", "Record_Type_Parent": "User"}
+  ],
+  "Values": [
+    [
+      "User",       // Index [0] -> Matches Record_Type_Parent
+      "2026-01-01", // Index [1] -> Matches created
+      "U01",        // Index [2] -> Matches user_id
+      "alice"       // Index [3] -> Matches username
+    ]
+  ]
+}
+
+
+In standard JSON, you would repeat the string "username": for every single record. In a dataset of 100,000 users, BEJSON saves you from writing that key 99,999 times, significantly reducing the file's storage footprint and transmission time.
+
+
+--------------------------------------------------------------------------------
+
+
+5. The 'null' Placeholder: Maintaining the Chain
+
+In a positional system, null is more than just "empty data." It is a structural requirement. From a Data Architect's perspective, skipping a value is catastrophic; it causes the entire record to shift left, misaligning every subsequent value with the schema.
+
+The "Rule of Thumb" for Nulls:
+
+* Rule 1: null is always a valid value for any type (string, array, etc.).
+* Rule 2: Use null to maintain the length of the array when a value is optional or missing.
+* Rule 3 (The 104db Rule): In multi-entity files, null is mandatory for fields that do not apply to the current record's type. If a record is a "User," all fields assigned to "Item" must be set to null.
+
+Architect’s Note: Without the null placeholder, you would be forced to re-allocate or shift arrays in memory during parsing, which has a computational cost of O(n). By using null to preserve width, we maintain O(1) access.
+
+
+--------------------------------------------------------------------------------
+
+
+6. Anatomy in Action: The SensorReading Case Study
+
+To truly appreciate the BEJSON anatomy, compare a single record in standard JSON against the BEJSON format. Note how the BEJSON version includes the header and the Fields definition to maintain its self-describing nature.
+
+Standard JSON (Redundant)
+
+{
+  "sensor_id": "S002",
+  "timestamp": "2026-01-10T12:00:00Z",
+  "temperature": 19.8,
+  "tags": null
+}
+
+
+BEJSON 104 (Efficient)
+
+{
+  "Format": "BEJSON",
+  "Format_Version": "104",
+  "Format_Creator": "Elton Boehnen",
+  "Records_Type": ["SensorReading"],
+  "Fields": [
+    {"name": "sensor_id", "type": "string"},
+    {"name": "timestamp", "type": "string"},
+    {"name": "temperature", "type": "number"},
+    {"name": "tags", "type": "array"}
+  ],
+  "Values": [
+    ["S002", "2026-01-10T12:00:00Z", 19.8, null]
+  ]
+}
+
+
+In the BEJSON example, the null in the tags field ensures the record stays at a length of four. Without it, the positional integrity of the file is compromised.
+
+
+--------------------------------------------------------------------------------
+
+
+7. Conclusion: The Efficiency of Integrity
+
+The power of BEJSON lies in its rigid adherence to structure. By enforcing positional synchronization, we gain the performance of a binary format with the accessibility of text.
+
+Architect’s Best Practices:
+
+* Backward Compatibility: To add data without breaking existing parsers, always append new fields to the end of the Fields array.
+* Breaking Changes: Reordering or removing fields from the Fields array is a major breaking change that requires a schema version increment.
+
+Anatomy Verification Checklist
+
+* [ ] I have verified that Format_Creator is set to "Elton Boehnen".
+* [ ] I understand that the Fields array is the Single Source of Truth (SSOT).
+* [ ] I have confirmed that every record in Values matches the length of the Fields array.
+* [ ] I know that BEJSON 104a is restricted to primitive types only.
+* [ ] I recognize that in 104db, every field (except index 0) must have a Record_Type_Parent.
+* [ ] I understand that null is a structural tool required to prevent data shifting.
+
+
+
+Theoretical Blueprint: Transitioning Diagrammatic Assets to MFDB (v1.3) Architecture
+
+1. The Strategic Shift: From Visual Shapes to Multi-File Entities
+
+The transition from monolithic diagram formats to the Multi-File Database (MFDB) standard represents a fundamental pivot from "dumb" visual nodes to "smart" data-driven entities. In legacy environments like Diagrammer v42, shapes are often captured as visual coordinates with a generic "body" field. Under the MFDB v1.3 architecture, we decompose these visual assets into a structured relational ecosystem. This shift enables rapid, index-based access and allows AI agents to traverse the diagram's logic without the overhead of key-value lookups, thanks to the core BEJSON principle of positional integrity.
+
+While the BEJSON 104db format offers a single-file multi-entity solution, it relies on a "discriminator" field (Record_Type_Parent) and extensive null-padding to maintain a unified schema. This leads to exponential bloat as the number of shape categories increases. MFDB resolves this by orchestrating separate, dense BEJSON 104 entity files. By isolating each shape category (e.g., Process, Decision, DataStore) into its own file, we eliminate null-padding entirely and achieve maximum data density. This architecture ensures that the diagram data is high-performance, readable by low-code applications, and perfectly suited for systemic discovery.
+
+2. The Manifest Layer: 104a.mfdb.bejson Configuration
+
+The Manifest serves as the immutable "Registry of Truth" for the diagram ecosystem. It is a BEJSON 104a document that mandates file-level metadata and strictly primitive data types to ensure rapid initialization.
+
+Technical Specification
+
+The manifest must be named 104a.mfdb.bejson and reside at the database root. Every manifest must include the following mandatory BEJSON metadata:
+
+* Format_Creator: "Elton Boehnen" (Absolute protocol requirement).
+* Records_Type: ["mfdb"] (Fixed value for manifest identification).
+* Format_Version: "104a".
+
+Mandatory PascalCase Headers:
+
+* MFDB_Version: Must be "1.3".
+* DB_Name: Identifies the diagram database.
+* Schema_Version: Application-level version (SemVer recommended).
+
+Manifest Fields Array
+
+The Fields key defines the registry structure. Due to positional integrity, fields must be appended; altering the middle of the array is a breaking change.
+
+Field Name	Type	Description
+entity_name	string	Unique name of the shape category (e.g., "ProcessNode").
+file_path	string	Relative path from the manifest to the .bejson entity file.
+description	string	Summary of the entity's role in the diagram.
+record_count	integer	Advisory count of records (used for drift detection).
+primary_key	string	The field name serving as the unique identifier in the entity file.
+
+The primary_key field is essential for Relational Discovery, allowing tools to resolve shape identities across disparate files without a monolithic index.
+
+3. Entity File Design: Implementing Unique Record Types per Shape
+
+In MFDB, each shape category—such as a Server, User, or Process—is treated as a unique BEJSON 104 entity. This permits specialized, high-density schemas that reflect the actual properties of the shape rather than a generic text block.
+
+Internal Structure and Positional Integrity
+
+Each Entity file (BEJSON 104) must include the Format_Creator ("Elton Boehnen") and a single-entry Records_Type matching the manifest entry. The Parent_Hierarchy key is mandatory and must contain the relative path from the entity file’s directory back to the manifest. This enables the Discovery Algorithm: any tool encountering a single shape file can immediately resolve the entire database context.
+
+Specialized Schemas vs. Null-Padding
+
+Unlike 104db, MFDB entity files are "dense." If a "Server" shape requires ip_address and uptime, those fields are defined only in the server.bejson file. A "User" shape in user.bejson might have role and permissions.
+
+* Constraint: Null-padding is strictly forbidden for structural purposes. A null in an MFDB entity file represents genuinely absent data, never a placeholder for a different entity’s schema.
+
+4. Establishing Relational Logic: Anchors and Connectors
+
+Maintaining topological integrity during transformation requires a strict "Convention-over-Configuration" approach for Foreign Keys (FK).
+
+Relational Naming Standards
+
+To facilitate automated mapping and referential discovery, all FK fields must use the _fk suffix (e.g., source_node_id_fk). This allows tooling to identify relationships without manual configuration.
+
+The "Link" Entity Schema
+
+Visual artifacts from the Diagrammer viewport—specifically the .conn (Connector) and .anc-hit (Anchor) classes—are converted into a dedicated "Link" or "Edge" entity. This file acts as a Join Table between nodes.
+
+Example Link Entity Schema (link.bejson):
+
+* link_id (string): Unique identifier for the connector.
+* source_node_id_fk (string): References the primary key of the origin shape.
+* target_node_id_fk (string): References the primary key of the destination shape.
+* link_type (string): Defines the relationship (e.g., "Dependency," "Flow," "Ownership").
+
+5. Implementation Blueprint: The Conversion Algorithm
+
+Transforming a raw Diagrammer viewport into a validated MFDB structure follows a standardized five-step algorithm:
+
+1. Extraction: Scan the viewport for all .shape-group elements and retrieve visual metadata.
+2. Classification: Trigger Records_Type assignment based on shape geometry (e.g., <polygon> to "Decision") or CSS class labels (e.g., .tier-badge).
+3. Normalization: Split nodes into individual .bejson files by type. Map attributes to dense schemas, ensuring no structurally-motivated nulls.
+4. Registration: Populate the 104a.mfdb.bejson manifest with unique entity_name and file_path entries for each file.
+5. Validation: Invoke mfdb_validator_validate_database to confirm bidirectional pathing and schema compliance.
+
+The Discovery Algorithm ensures that the resulting database is self-healing. By following the Parent_Hierarchy back to the root, tools can perform the Bidirectional Path Check, ensuring the manifest and entity files are perfectly aligned.
+
+6. Validation and Integrity Standards
+
+MFDB v1.3 enforces a strict validation hierarchy to prevent "orphaned" shapes and broken links, utilizing a specific error code range (30–49).
+
+The Validation Checklist
+
+* Level 1 (Manifest): Validates BEJSON 104a syntax, Records_Type integrity (Code 32), and that all file_path entries resolve (Code 33).
+* Level 2 (Entity): Validates BEJSON 104 syntax, the presence of Parent_Hierarchy (Code 36), and the Bidirectional Path Check (Code 38), ensuring the manifest and entity point to each other accurately.
+* Level 3 (Database): Performs referential checks for unresolved _fk targets (Code 39) and record_count synchronization.
+
+Integrity Requirements
+
+* Hard Errors: Missing mandatory keys, nulls in required manifest fields, or broken Parent_Hierarchy links (Codes 30, 31, 36, 40, 41) constitute hard failures.
+* Standardization Warnings: Non-snake_case field names or non-PascalCase headers trigger warnings but do not invalidate the database.
+* Path Resolution: Absolute paths are strictly forbidden. All resolution must be relative to the file's current directory to ensure the database remains portable (e.g., for Zip export).
+
+Adherence to this blueprint elevates diagrammatic assets from static drawings to scalable, AI-readable relational databases, eliminating data redundancy and maximizing architectural clarity.
+
+
+
+ **Connectors** entity is an excellent idea and represents the best-practice approach for converting a diagram into a relational architecture like MFDB. 
+
+In database design, a connector acts as an "edge" between two "nodes" (the shapes). By making connectors their own distinct entity, you separate the relationship logic from the shape data. This allows multiple connectors to link to the same shape, enables bidirectional mapping, and lets you store specific visual data for the connecting lines without cluttering your shape entities.
+
+Following the **MFDB architectural conventions**, here are the fields you would need for this Connectors entity:
+
+**Mandatory Relational Fields:**
+*   **`connector_id` (string):** The primary key for the connector itself. By MFDB standard protocol, primary keys should follow the `<entity_name_lower>_id` format.
+*   **`source_shape_id_fk` (string):** A foreign key pointing to the shape where the line begins. Adding the `_fk` suffix is the recommended MFDB convention so that tooling can automatically perform joins at runtime.
+*   **`target_shape_id_fk` (string):** A foreign key pointing to the shape where the line ends.
+
+**Diagram-Specific Data Fields:**
+Based on the visual interface features of the BEJSON Diagram Viewer, you would want fields that capture how the lines are drawn and styled on the canvas:
+*   **`direction` (string):** Indicates the flow direction (e.g., `"forward"`, `"backward"`, `"bidirectional"`, or `"none"`).
+*   **`source_anchor` (string):** Specifies exactly where on the source shape the line attaches. In the diagram interface, connections attach to anchor points (`.anc-hit`, `.anc-vis`). This could hold values like `"top"`, `"bottom"`, `"left"`, or `"right"`.
+*   **`target_anchor` (string):** Specifies the attachment anchor on the destination shape.
+*   **`line_style` (string):** Allows you to save specific CSS connection states (like `.conn` or `.conn.sel` for selected, thicker lines).
+*   **`label` (string):** (Optional) If you want the ability to add text directly over the connector lines. 
+
+### How it would look in MFDB
+If you built this as its own entity file (e.g., `data/connector.bejson`), it would be a valid BEJSON 104 document containing the required `Parent_Hierarchy` key pointing back to your MFDB manifest.
+
+Here is an example of how that entity file would be structured:
+
+```json
+{
+  "Format": "BEJSON",
+  "Format_Version": "104",
+  "Format_Creator": "Elton Boehnen",
+  "Parent_Hierarchy": "../104a.mfdb.bejson",
+  "Records_Type": ["Connector"],
+  "Fields": [
+    {"name": "connector_id", "type": "string"},
+    {"name": "source_shape_id_fk", "type": "string"},
+    {"name": "target_shape_id_fk", "type": "string"},
+    {"name": "direction", "type": "string"},
+    {"name": "source_anchor", "type": "string"},
+    {"name": "target_anchor", "type": "string"}
+  ],
+  "Values": [
+    ["C001", "SHAPE_01", "SHAPE_02", "forward", "right", "left"],
+    ["C002", "SHAPE_02", "SHAPE_03", "bidirectional", "bottom", "top"]
+  ]
+}
+```
+
+This structure is highly scalable. If your diagrammer eventually supports complex features like curved routing paths or animated connector lines, you simply append those new fields to the end of the `Fields` array in the `Connector` entity without breaking your existing shapes.
+
+
+Understanding BEJSON: The Anatomy of Positional Integrity
+
+1. Introduction: What is Positional Integrity?
+
+As a Senior Technical Educator and Data Architect, I often see systems struggle under the weight of redundant metadata. Traditional JSON, while flexible, is inherently bloated because it repeats keys for every single record. BEJSON (Boehnen Elton JSON) is a strict, self-describing tabular data format designed to solve this by enforcing Positional Integrity.
+
+Positional Integrity is the architectural requirement that the physical order of data elements within a record must precisely align with a predefined schema at the top of the file. By decoupling the "structure" from the "data," BEJSON eliminates the need for repeated keys, enabling rapid parsing and direct index-based access.
+
+Key Insight: Why Index-Based Access Matters In standard JSON, a parser must perform a "key lookup" (a string search or hash table hit) for every property in every object. This adds significant CPU overhead. In BEJSON, the computer knows that "Price" is at index [3]. Index-based access is an O(1) operation, meaning the time to find data is constant regardless of how many keys the schema contains. This makes BEJSON exceptionally performant for large datasets and easily digestible by LLMs and native programming languages.
+
+This shift from key-value pairs to strict alignment transforms the file into a lightweight, high-performance database while remaining human-readable.
+
+
+--------------------------------------------------------------------------------
+
+
+2. The Blueprint: The Fields Array
+
+In the BEJSON architecture, the Fields array serves as the Single Source of Truth (SSOT). It functions as an internal schema, defining the name and data type for every piece of information once and for all at the top level. This design choice eliminates the need for external .xsd or .json schema files.
+
+Validation Rules for the Blueprint:
+
+1. Strict Creator: For any BEJSON document to be valid, the Format_Creator must be precisely "Elton Boehnen".
+2. No Duplicates: Field names must be unique within the array; duplicate names will cause a hard validation failure.
+3. Type Restrictions: BEJSON supports six types, but your choice of version matters:
+  * BEJSON 104 & 104db: Support all types (string, integer, number, boolean, array, object).
+  * BEJSON 104a: Is strictly limited to primitive types (string, integer, number, boolean).
+
+Example Blueprint: SensorReading
+
+If we define an environmental monitoring system, our Fields array would look like this:
+
+Field Name	Data Type	Record_Type_Parent (104db only)	Description
+sensor_id	string	"SensorReading"	Unique hardware ID
+timestamp	string	"SensorReading"	ISO 8601 UTC time
+temperature	number	"SensorReading"	Floating point reading
+tags	array	"SensorReading"	List of string labels
+
+Once this blueprint is set, the actual data must follow it perfectly. Any deviation in order, count, or type results in a broken document.
+
+
+--------------------------------------------------------------------------------
+
+
+3. The Cargo: The Values Array
+
+If Fields is the blueprint, the Values array is the cargo. In BEJSON, records are stored as arrays of raw values rather than objects. To maintain the integrity of the file, every record within the Values array must adhere to two absolute constraints:
+
+1. Exact Length Match: If the Fields array defines 10 fields, every record in Values must contain exactly 10 elements. An array that is too short or too long breaks the index mapping.
+2. Type Integrity: Each value must match the type declared at its corresponding index in the Fields array. However, null is a valid value for any declared type, serving as a critical structural tool.
+
+
+--------------------------------------------------------------------------------
+
+
+4. The Logic of Alignment: Why Order is Everything
+
+The synchronization between the Fields and Values indices is where the efficiency gain is realized. In the 104db multi-entity format, this alignment is even more critical because the file can store different types of entities (e.g., Users and Items) in a single array.
+
+Observe how the value "alice" is mapped to its field name strictly by its position at index [3]. Note that in 104db, every field except the discriminator itself must specify its Record_Type_Parent.
+
+{
+  "Format": "BEJSON",
+  "Format_Version": "104db",
+  "Format_Creator": "Elton Boehnen",
+  "Records_Type": ["User", "Item"],
+  "Fields": [
+    {"name": "Record_Type_Parent", "type": "string"},
+    {"name": "created", "type": "string", "Record_Type_Parent": "User"},
+    {"name": "user_id", "type": "string", "Record_Type_Parent": "User"},
+    {"name": "username", "type": "string", "Record_Type_Parent": "User"}
+  ],
+  "Values": [
+    [
+      "User",       // Index [0] -> Matches Record_Type_Parent
+      "2026-01-01", // Index [1] -> Matches created
+      "U01",        // Index [2] -> Matches user_id
+      "alice"       // Index [3] -> Matches username
+    ]
+  ]
+}
+
+
+In standard JSON, you would repeat the string "username": for every single record. In a dataset of 100,000 users, BEJSON saves you from writing that key 99,999 times, significantly reducing the file's storage footprint and transmission time.
+
+
+--------------------------------------------------------------------------------
+
+
+5. The 'null' Placeholder: Maintaining the Chain
+
+In a positional system, null is more than just "empty data." It is a structural requirement. From a Data Architect's perspective, skipping a value is catastrophic; it causes the entire record to shift left, misaligning every subsequent value with the schema.
+
+The "Rule of Thumb" for Nulls:
+
+* Rule 1: null is always a valid value for any type (string, array, etc.).
+* Rule 2: Use null to maintain the length of the array when a value is optional or missing.
+* Rule 3 (The 104db Rule): In multi-entity files, null is mandatory for fields that do not apply to the current record's type. If a record is a "User," all fields assigned to "Item" must be set to null.
+
+Architect’s Note: Without the null placeholder, you would be forced to re-allocate or shift arrays in memory during parsing, which has a computational cost of O(n). By using null to preserve width, we maintain O(1) access.
+
+
+--------------------------------------------------------------------------------
+
+
+6. Anatomy in Action: The SensorReading Case Study
+
+To truly appreciate the BEJSON anatomy, compare a single record in standard JSON against the BEJSON format. Note how the BEJSON version includes the header and the Fields definition to maintain its self-describing nature.
+
+Standard JSON (Redundant)
+
+{
+  "sensor_id": "S002",
+  "timestamp": "2026-01-10T12:00:00Z",
+  "temperature": 19.8,
+  "tags": null
+}
+
+
+BEJSON 104 (Efficient)
+
+{
+  "Format": "BEJSON",
+  "Format_Version": "104",
+  "Format_Creator": "Elton Boehnen",
+  "Records_Type": ["SensorReading"],
+  "Fields": [
+    {"name": "sensor_id", "type": "string"},
+    {"name": "timestamp", "type": "string"},
+    {"name": "temperature", "type": "number"},
+    {"name": "tags", "type": "array"}
+  ],
+  "Values": [
+    ["S002", "2026-01-10T12:00:00Z", 19.8, null]
+  ]
+}
+
+
+In the BEJSON example, the null in the tags field ensures the record stays at a length of four. Without it, the positional integrity of the file is compromised.
+
+
+--------------------------------------------------------------------------------
+
+
+7. Conclusion: The Efficiency of Integrity
+
+The power of BEJSON lies in its rigid adherence to structure. By enforcing positional synchronization, we gain the performance of a binary format with the accessibility of text.
+
+Architect’s Best Practices:
+
+* Backward Compatibility: To add data without breaking existing parsers, always append new fields to the end of the Fields array.
+* Breaking Changes: Reordering or removing fields from the Fields array is a major breaking change that requires a schema version increment.
+
+Anatomy Verification Checklist
+
+* [ ] I have verified that Format_Creator is set to "Elton Boehnen".
+* [ ] I understand that the Fields array is the Single Source of Truth (SSOT).
+* [ ] I have confirmed that every record in Values matches the length of the Fields array.
+* [ ] I know that BEJSON 104a is restricted to primitive types only.
+* [ ] I recognize that in 104db, every field (except index 0) must have a Record_Type_Parent.
+* [ ] I understand that null is a structural tool required to prevent data shifting.
+
